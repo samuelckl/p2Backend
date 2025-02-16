@@ -193,7 +193,7 @@ app.post("/users", async (req, res) => {
   }
 });
 
-// Get all subjects
+// Add subject
 app.post("/subjects", async (req, res) => {
   try {
     console.log(req.body);
@@ -335,6 +335,36 @@ app.post("/user_availabilities", async (req, res) => {
 
     console.log("User availabilities updated:", data);
     res.status(201).json(data);
+  } catch (err) {
+    console.error("Unexpected Error:", err);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// Delete user and subjects and availabilities on cascade
+app.delete("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params; // Extract user ID from URL
+
+    if (!id) {
+      return res.status(400).json({ error: "User ID is required" });
+    }
+
+    const { data, error } = await supabase
+      .from("users")
+      .delete()
+      .eq("id", id)
+      .select();
+
+    if (error) {
+      console.error("Supabase Error:", error);
+      return res.status(500).json({ error: "Failed to delete user" });
+    }
+
+    console.log("User Deleted:", data);
+    res
+      .status(200)
+      .json({ message: "User deleted successfully", deletedUser: data });
   } catch (err) {
     console.error("Unexpected Error:", err);
     res.status(500).json({ error: "Internal Server Error" });
