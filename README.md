@@ -7,3 +7,10 @@ Created the backend project for user, subjects and availabilities"
 
 - logic to add later
   each user shuold only be able to have 4 enrolment
+
+Supabase tables:
+- availabilities
+- subjects
+- subject_availabilities
+- users
+- user_subjects_availabilities
