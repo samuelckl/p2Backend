@@ -5,6 +5,16 @@ import express from "express";
 import cors from "cors";
 import { supabase } from "./supabaseClient.js";
 
+import {
+  isValidSubjectAvailability,
+  fetchUserWithDetails,
+  deleteUser,
+  isUserEnrolled,
+  isEnrollmentFull,
+  insertUser,
+  enrollUser,
+  getExistingUser,
+} from "./components/helper.js";
 
 dotenv.config();
 
@@ -28,10 +38,12 @@ app.use(
 app.get("/users", async (_, res) => {
   try {
     let query = supabase.from("users").select(`
-                *,
-                user_subjects(subject_id, subjects(name)),
-                user_availabilities(availability_id, availabilities(day))
-            `);
+        id, name,
+        user_subjects_availabilities(
+          subject_id, subjects(name),
+          availability_id, availabilities(day)
+        )
+      `);
 
     const { data, error } = await query;
 
@@ -40,10 +52,11 @@ app.get("/users", async (_, res) => {
       return res.status(500).json({ error: "Failed to fetch users" });
     }
 
-    console.log("Filtered Users Retrieval:", data);
-    if (data.length === 0) {
-      res.status(400).json({ error: "No users in record" });
+    if (!data || data.length === 0) {
+      return res.status(400).json({ error: "No users in record" });
     }
+
+    console.log("Filtered Users Retrieval:", data);
     res.status(200).json(data);
   } catch (err) {
     console.error("Unexpected Error:", err);
@@ -51,145 +64,65 @@ app.get("/users", async (_, res) => {
   }
 });
 
-// Adding new user
+// POST create user
 app.post("/users", async (req, res) => {
   try {
     console.log(req.body);
-    const { name, subject_id, availability_id } = req.body; // Extract fields
+    const { name, subject_id, availability_id } = req.body; // Extract subject_id and availability_id, each user should enrol to a subject with 1 availability when create
 
-    // Check required fields for new user
-    if (!name || !subject_id || !availability_id) {
-      return res
-        .status(400)
-        .json({ error: "Name, subject_id, and availability_id are required." });
-    }
-
-    // Validate fields format
+    // Validate required fields
     if (
-      !Array.isArray(subject_id) ||
-      !subject_id.every((id) => Number.isInteger(id)) ||
-      !Array.isArray(availability_id) ||
-      !availability_id.every((id) => Number.isInteger(id))
+      !name ||
+      !Number.isInteger(subject_id) ||
+      !Number.isInteger(availability_id)
     ) {
+      return res.status(400).json({
+        error: "Name, subject_id, and availability_id are required.",
+      });
+    }
+
+    // Validate subject-availability pair, check if in subject_availabilities
+    if (!(await isValidSubjectAvailability(subject_id, availability_id))) {
       return res
         .status(400)
-        .json({
-          error: "subject_id and availability_id must be arrays of integers.",
-        });
+        .json({ error: "Invalid subject_id and availability_id combination." });
     }
 
-    // Check the subjects count 
-    const { data: subjectCounts, error: countError } = await supabase
-      .from("user_subjects")
-      .select("subject_id", { count: "exact" })
-      .in("subject_id", subject_id);
-
-    if (countError) {
-      console.error("Supabase Error:", countError);
-      return res
-        .status(500)
-        .json({ error: "Failed to check subject enrolment count" });
+    // Check if the subject-availability slot is full (Max: 8 students)
+    if (await isEnrollmentFull(subject_id, availability_id)) {
+      return res.status(400).json({
+        error:
+          "Subject-availability slot has reached the maximum of 8 students.",
+      });
     }
 
-    // And see if any exceeds 8 students (constraint), return error if exceeds maximum count
-    const SubMaximumCapacity = 8;
-    const subjectEnrollment = {};
-    subjectCounts.forEach(({ subject_id }) => {
-      subjectEnrollment[subject_id] = (subjectEnrollment[subject_id] || 0) + 1;
-    });
-
-    if (subject_id.some((id) => (subjectEnrollment[id] || 0) >= SubMaximumCapacity)) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "One or more subjects have already reached the maximum of 8 students.",
-        });
-    }
-
-    // Check if name exist (constraint)
-    const { data: existingUser, error: nameError } = await supabase
-      .from("users")
-      .select("id")
-      .eq("name", name)
-      .maybeSingle(); 
-
-    if (nameError) {
-      console.error("Supabase Error (Name Check):", nameError);
-      return res.status(500).json({ error: "Failed to check user existence." });
-    }
-
-    if (existingUser) {
+    // Check if user name already exists
+    if (await getExistingUser(name)) {
       return res
         .status(400)
         .json({ error: "User with this name already exists." });
     }
 
-    // Insert User
-    const { data: userData, error: userInsertError } = await supabase
-      .from("users")
-      .insert({name})
-      .select()
-      .single()
+    // Insert user
+    const user = await insertUser(name);
+    const user_id = user.id;
 
-    const user_id = userData.id; // Get the newly created user's ID
-    if (userInsertError) {
-      console.log("userInsertError", userInsertError);
-      return res.status(400).json({ error: "Failed to insert User." });
+    // Enroll user to user_subjects_availabilities
+    try {
+      await enrollUser(user_id, subject_id, availability_id);
+    } catch (error) {
+      console.error("Enrollment Error:", error);
+      await deleteUser(user_id); // Rollback if enrollment fails
+      return res.status(400).json({ error: error.message });
     }
 
-    // Insert User Subjects
-    const subjectRecords = subject_id.map((id) => ({
-      user_id,
-      subject_id: id,
-    }));
+    const userProfile = await fetchUserWithDetails(user_id);
 
-    const { error: subjectError } = await supabase
-      .from("user_subjects")
-      .insert(subjectRecords);
-
-    if (subjectError) {
-      console.error("Supabase Error (Subject Insert):", subjectError);
-      return res.status(400).json({ error: "Failed to link subjects." });
-    }
-
-    // Insert User Availability
-    const availabilityRecords = availability_id.map((id) => ({
-      user_id,
-      availability_id: id,
-    }));
-
-    const { error: availabilityError } = await supabase
-      .from("user_availabilities")
-      .insert(availabilityRecords);
-
-    if (availabilityError) {
-      console.error("Supabase Error (Availability Insert):", availabilityError);
-      return res.status(400).json({ error: "Failed to link availabilities." });
-    }
-
-    // Return created user object with subjects and availabilities
-    const { data: fullUser, error: fetchError } = await supabase
-      .from("users")
-      .select(
-        `
-                *,
-                user_subjects(subject_id),
-                user_availabilities(availability_id)
-            `
-      )
-      .eq("id", user_id);
-
-    if (fetchError) {
-      console.error("Supabase Error (Fetch User):", fetchError);
-      return res.status(400).json({ error: "Failed to fetch user details." });
-    }
-
-    console.log("User Created Successfully:", fullUser);
-    res.status(201).json(fullUser);
+    console.log("User Created Successfully:", userProfile);
+    res.status(201).json(userProfile);
   } catch (err) {
     console.error("Unexpected Error:", err);
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: err.message || "Internal Server Error" });
   }
 });
 
@@ -197,144 +130,218 @@ app.post("/users", async (req, res) => {
 app.post("/subjects", async (req, res) => {
   try {
     console.log(req.body);
-    const { data, error } = await supabase
-      .from("subjects")
-      .insert(req.body)
-      .select();
+    const { name, availability_ids } = req.body; // Extract fields
 
-    if (error) {
-      console.error("Supabase Error:", error);
-      return res.status(400).json({ error: "Failed to create subject" });
+    // Validate required fields
+    if (
+      !name ||
+      !Array.isArray(availability_ids) ||
+      availability_ids.length === 0
+    ) {
+      return res
+        .status(400)
+        .json({ error: "Name and at least one availability_id are required." });
     }
 
-    console.log("Subject created:", data);
-    res.status(201).json(data);
+    // This should be removed if handle in frontend
+    if (!availability_ids.every((id) => Number.isInteger(id))) {
+      return res
+        .status(400)
+        .json({ error: "availability_ids must be an array of integers." });
+    }
+
+    // Insert subject
+    const { data: subjectData, error: subjectError } = await supabase
+      .from("subjects")
+      .insert({ name })
+      .select()
+      .single();
+
+    if (subjectError) {
+      console.error("Supabase Error (Insert Subject):", subjectError);
+      return res.status(400).json({ error: "Failed to create subject." });
+    }
+
+    const subject_id = subjectData.id; // Get new subject ID
+
+    const subjectAvailabilities = availability_ids.map((availability_id) => ({
+      subject_id,
+      availability_id,
+    }));
+
+    // Insert into subject_availabilities
+    const { error: availabilityError } = await supabase
+      .from("subject_availabilities")
+      .insert(subjectAvailabilities);
+
+    if (availabilityError) {
+      console.error(
+        "Supabase Error (Insert Subject Availabilities):",
+        availabilityError
+      );
+
+      // Rollback: Delete the subject if availability insert fails
+      const { error: rollbackError } = await supabase
+        .from("subjects")
+        .delete()
+        .eq("id", subject_id);
+
+      if (rollbackError) {
+        console.error("Rollback Error:", rollbackError);
+        return res.status(500).json({
+          error: "Critical error: Subject created but rollback failed.",
+        });
+      }
+
+      return res
+        .status(400)
+        .json({ error: "Failed to assign availabilities to subject." });
+    }
+
+    // Fetch created subject with availabilities
+    const { data: fullSubject, error: fetchError } = await supabase
+      .from("subjects")
+      .select(
+        `
+          id, name,
+          subject_availabilities(availability_id, availabilities(day))
+        `
+      )
+      .eq("id", subject_id)
+      .single();
+
+    if (fetchError) {
+      console.error("Supabase Error (Fetch Subject):", fetchError);
+      return res
+        .status(400)
+        .json({ error: "Failed to fetch subject details." });
+    }
+
+    console.log("Subject created with availabilities:", fullSubject);
+    res.status(201).json(fullSubject);
   } catch (err) {
     console.error("Unexpected Error:", err);
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
-// Subject Enrolment
+// POST enrolment
 app.post("/enrolment", async (req, res) => {
   try {
     console.log(req.body);
-    const { subject_id, user_id } = req.body; 
+    const { user_id, subject_id, availability_id } = req.body;
 
-    // Check student count
-    const { count, error: countError } = await supabase
-      .from("user_subjects")
-      .select("*", { count: "exact" })
-      .eq("subject_id", subject_id);
-
-    if (countError) {
-      console.error("Supabase Error:", countError);
-      return res
-        .status(500)
-        .json({ error: "Failed to check subject enrolment count" });
+    // Validate required fields
+    if (!user_id || !subject_id || !availability_id) {
+      return res.status(400).json({
+        error: "user_id, subject_id, and availability_id are required.",
+      });
     }
 
-    if (count >= 8) {
+    // Validate subject-availability pair
+    if (!(await isValidSubjectAvailability(subject_id, availability_id))) {
       return res
         .status(400)
-        .json({ error: "Subject has already been fulfilled for 8 students." });
+        .json({ error: "Invalid subject_id and availability_id combination." });
     }
 
-    const { data: ifEnrolled, error: enrolledError } = await supabase
-      .from("user_subjects")
-      .select("*")
-      .eq("user_id", user_id);
-
-    if (enrolledError) {
-      console.error("Supabase Error:", countError);
-      return res
-        .status(500)
-        .json({ error: "Failed to check if student already enrolled" });
+    // Check if the subject-availability slot is full
+    if (await isEnrollmentFull(subject_id, availability_id)) {
+      return res.status(400).json({
+        error:
+          "Subject-availability slot has reached the maximum of 8 students.",
+      });
     }
 
-    if (ifEnrolled.some((enrollment) => enrollment.subject_id === subject_id)) {
-      console.log("ifEnrolled", ifEnrolled);
-      return res
-        .status(400)
-        .json({
-          error: "Subject has already been enrolled by the current student.",
-        });
+    // Check if the user is already enrolled
+    if (await isUserEnrolled(user_id, subject_id, availability_id)) {
+      return res.status(400).json({
+        error:
+          "User is already enrolled in this subject with the same availability.",
+      });
     }
 
-    // Enrol student if class not as much as 8
+    // Insert enrollment record
     const { data, error } = await supabase
-      .from("user_subjects")
-      .insert(req.body)
+      .from("user_subjects_availabilities")
+      .insert({ user_id, subject_id, availability_id })
       .select();
 
     if (error) {
-      console.error("Supabase Error:", error);
-      return res.status(400).json({ error: "Failed to enroll subject" });
+      console.error("Supabase Error (Enrollment Insert):", error);
+      return res
+        .status(400)
+        .json({ error: "Failed to enroll user in subject." });
     }
 
     console.log("Enrolment successful:", data);
     res.status(201).json(data);
   } catch (err) {
     console.error("Unexpected Error:", err);
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: err.message || "Internal Server Error" });
   }
 });
 
-// Insert user availabilities
-app.post("/user_availabilities", async (req, res) => {
+// GET group of students in same subject_availability pair
+app.get("/group", async (req, res) => {
   try {
-    console.log(req.body);
-    const { availability_id, user_id } = req.body; // Extract availabity_id [] and user_id
+    const { subject_id, availability_id } = req.query; // Extract query params
 
-    if (!availability_id || !Array.isArray(availability_id)) {
-      return res
-        .status(400)
-        .json({ error: "Invalid availability_id format. Must be an array." });
+    // Start query
+    let query = supabase.from("users").select(`
+          name,
+          user_subjects_availabilities!inner(
+            subject_id, subjects(name),
+            availability_id, availabilities(day)
+          )
+        `);
+
+    // Optional filters
+    if (subject_id) {
+      query = query.eq("user_subjects_availabilities.subject_id", subject_id);
+    }
+    if (availability_id) {
+      query = query.eq(
+        "user_subjects_availabilities.availability_id",
+        availability_id
+      );
     }
 
-    const isValid = availability_id.every(
-      (id) => Number.isInteger(id) && id >= 1 && id <= 7
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("Supabase Error:", error);
+      return res.status(500).json({ error: "Failed to fetch users" });
+    }
+
+    // Manually filter user with no subjects
+    const filteredData = data.filter(
+      (user) => user.user_subjects_availabilities.length > 0
     );
 
-    if (!isValid) {
-      return res.status(400).json({
-        error: "Invalid availability_id. Must be integers between 1 and 7.",
-      });
-    }
-
-    // First delete exissting user_availabilities
-    const { error: deleteError } = await supabase
-      .from("user_availabilities")
-      .delete()
-      .eq("user_id", user_id);
-
-    if (deleteError) {
-      console.error("Supabase Error (Delete):", deleteError);
-      return res
-        .status(500)
-        .json({ error: "Failed to clear previous availabilities." });
-    }
-
-    // Mapped and insert all availability of user
-    const newAvailabilityRecords = availability_id.map((id) => ({
-      user_id: user_id,
-      availability_id: id,
-    }));
-
-    const { data, error } = await supabase
-      .from("user_availabilities")
-      .insert(newAvailabilityRecords)
-      .select();
-
-    if (error) {
-      console.error("Supabase Error (Insert):", error);
+    if (!filteredData || filteredData.length === 0) {
       return res
         .status(400)
-        .json({ error: "Failed to update availabilities." });
+        .json({ error: "No users found with given filters." });
     }
 
-    console.log("User availabilities updated:", data);
-    res.status(201).json(data);
+    // Extract subject names & availability days correctly
+    const firstUser = filteredData[0]?.user_subjects_availabilities[0] || {};
+    const subjectName = firstUser.subjects?.name || `Subject ID ${subject_id}`;
+    const availabilityDay =
+      firstUser.availabilities?.day || `Availability ID ${availability_id}`;
+
+    // Extract only the names from the result
+    const names = filteredData.map((user) => user.name);
+
+    // Build response message
+    let message = "Students ";
+    if (subject_id) message += `enrolled in subject: ${subjectName} `;
+    if (availability_id) message += `with availability on: ${availabilityDay}`;
+    message += ".";
+
+    console.log("Filtered Users Retrieval:", names);
+    res.status(200).json({ message, names });
   } catch (err) {
     console.error("Unexpected Error:", err);
     res.status(500).json({ error: "Internal Server Error" });
@@ -371,33 +378,4 @@ app.delete("/users/:id", async (req, res) => {
   }
 });
 
-// Delete user and subjects and availabilities on cascade
-app.delete("/users/:id", async (req, res) => {
-  try {
-    const { id } = req.params; // Extract user ID from URL
-
-    if (!id) {
-      return res.status(400).json({ error: "User ID is required" });
-    }
-
-    const { data, error } = await supabase
-      .from("users")
-      .delete()
-      .eq("id", id)
-      .select();
-
-    if (error) {
-      console.error("Supabase Error:", error);
-      return res.status(500).json({ error: "Failed to delete user" });
-    }
-
-    console.log("User Deleted:", data);
-    res
-      .status(200)
-      .json({ message: "User deleted successfully", deletedUser: data });
-  } catch (err) {
-    console.error("Unexpected Error:", err);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
 export default app;
