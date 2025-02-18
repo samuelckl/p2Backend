@@ -64,6 +64,45 @@ app.get("/users", async (_, res) => {
   }
 });
 
+// To get user details by ID or Name
+app.get("/user/:name", async (req, res) => {
+  try {
+    const { name } = req.params; // Get the name from URL parameters
+
+    if (!name) {
+      return res.status(400).json({ error: "User Name is required" });
+    }
+
+    const { data, error } = await supabase
+      .from("users")
+      .select(
+        `
+          id, name,
+          user_subjects_availabilities(
+            subject_id, subjects(name),
+            availability_id, availabilities(day)
+          )
+        `
+      )
+      .ilike("name", name)
+      .maybeSingle(); 
+    if (error) {
+      console.error("Supabase Error:", error);
+      return res.status(500).json({ error: "Failed to fetch user" });
+    }
+
+    if (!data) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    console.log("User Retrieved:", data);
+    res.status(200).json(data);
+  } catch (err) {
+    console.error("Unexpected Error:", err);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
 // POST create user
 app.post("/users", async (req, res) => {
   try {
