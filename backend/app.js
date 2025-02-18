@@ -130,7 +130,7 @@ app.post("/users", async (req, res) => {
 app.post("/subjects", async (req, res) => {
   try {
     console.log(req.body);
-    const { name, availability_ids } = req.body; // Extract fields
+    const { name, description, availability_ids } = req.body; // Extract fields
 
     // Validate required fields
     if (
@@ -153,7 +153,7 @@ app.post("/subjects", async (req, res) => {
     // Insert subject
     const { data: subjectData, error: subjectError } = await supabase
       .from("subjects")
-      .insert({ name })
+      .insert({ name, description })
       .select()
       .single();
 
@@ -203,8 +203,8 @@ app.post("/subjects", async (req, res) => {
       .from("subjects")
       .select(
         `
-          id, name,
-          subject_availabilities(availability_id, availabilities(day))
+          id, name,description, 
+          subject_availabilities!subject_availabilities_subject_id_fkey(*)
         `
       )
       .eq("id", subject_id)

@@ -1,5 +1,7 @@
+import { supabase } from "../supabaseClient.js";
+
 // Helper function to check if subject_id and availability_id exist in subject_availabilities
-const isValidSubjectAvailability = async (subject_id, availability_id) => {
+export const isValidSubjectAvailability = async (subject_id, availability_id) => {
   const { data, error } = await supabase
     .from("subject_availabilities")
     .select("subject_id, availability_id")
@@ -11,7 +13,7 @@ const isValidSubjectAvailability = async (subject_id, availability_id) => {
 };
 
 // Helper function to check if enrollment count exceeds max students per slot
-const isEnrollmentFull = async (
+export const isEnrollmentFull = async (
   subject_id,
   availability_id,
   maxStudents = 8
@@ -26,7 +28,7 @@ const isEnrollmentFull = async (
 };
 
 // Helper function to check if a user is already enrolled in the subject-availability
-const isUserEnrolled = async (user_id, subject_id, availability_id) => {
+export const isUserEnrolled = async (user_id, subject_id, availability_id) => {
   const { data, error } = await supabase
     .from("user_subjects_availabilities")
     .select("user_id")
@@ -39,7 +41,7 @@ const isUserEnrolled = async (user_id, subject_id, availability_id) => {
 };
 
 // Check if a user is already in the database
-const getExistingUser = async (name) => {
+export const getExistingUser = async (name) => {
   const { data, error } = await supabase
     .from("users")
     .select("id")
@@ -51,7 +53,7 @@ const getExistingUser = async (name) => {
 };
 
 // Insert user into the database
-const insertUser = async (name) => {
+export const insertUser = async (name) => {
   const { data, error } = await supabase
     .from("users")
     .insert({ name })
@@ -63,7 +65,7 @@ const insertUser = async (name) => {
 };
 
 // Enroll user in a subject-availability
-const enrollUser = async (user_id, subject_id, availability_id) => {
+export const enrollUser = async (user_id, subject_id, availability_id) => {
   const { data, error } = await supabase
     .from("user_subjects_availabilities")
     .insert({ user_id, subject_id, availability_id })
@@ -74,14 +76,14 @@ const enrollUser = async (user_id, subject_id, availability_id) => {
 };
 
 // Delete user if enrollment fails (Rollback)
-const deleteUser = async (user_id) => {
+export const deleteUser = async (user_id) => {
   const { error } = await supabase.from("users").delete().eq("id", user_id);
   if (error)
     throw new Error("Critical error: User created but rollback failed.");
 };
 
 // Fetch user with subjects and availabilities
-const fetchUserWithDetails = async (user_id) => {
+export const fetchUserWithDetails = async (user_id) => {
   const { data, error } = await supabase
     .from("users")
     .select(
@@ -99,13 +101,3 @@ const fetchUserWithDetails = async (user_id) => {
   return data;
 };
 
-export default {
-  isValidSubjectAvailability,
-  fetchUserWithDetails,
-  deleteUser,
-  isUserEnrolled,
-  isEnrollmentFull,
-  insertUser,
-  enrollUser,
-  getExistingUser,
-};
